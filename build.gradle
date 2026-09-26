@@ -1,0 +1,154 @@
+plugins {
+    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
+    id("biz.aQute.bnd.builder") version "7.2.3"
+}
+
+apply plugin: 'maven-publish'
+apply plugin: 'signing'
+apply plugin: 'java'
+
+version = '3.2.0'
+group = 'de.undercouch'
+
+ext.isReleaseVersion = !version.endsWith("SNAPSHOT")
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << "-Xlint"
+}
+
+configurations {
+    integrationTestBase
+    integrationTest30 { extendsFrom integrationTestBase }
+    integrationTest31 { extendsFrom integrationTestBase }
+    integrationTest32 { extendsFrom integrationTestBase }
+}
+
+String jacksonCore = 'tools.jackson.core:jackson-core:'
+String jacksonDatabind = 'tools.jackson.core:jackson-databind:'
+String junit = 'junit:junit:4.13.2'
+String mongoDbJavaDriver = 'org.mongodb:mongo-java-driver:3.12.14'
+
+dependencies {
+    implementation jacksonCore + '3.2.0'
+    implementation jacksonDatabind + '3.2.0'
+
+    testImplementation junit
+    testImplementation mongoDbJavaDriver
+
+    integrationTestBase junit
+    integrationTestBase mongoDbJavaDriver
+
+    integrationTest30 jacksonCore + '3.0.4'
+    integrationTest30 jacksonDatabind + '3.0.4'
+
+    integrationTest31 jacksonCore + '3.1.0'
+    integrationTest31 jacksonDatabind + '3.1.0'
+
+    integrationTest32 jacksonCore + '3.2.0'
+    integrationTest32 jacksonDatabind + '3.2.0'
+}
+
+tasks.named("jar") {
+    // define OSGi bundle manifest
+    bundle {
+        bnd(
+            "Bundle-Name": "bson4jackson",
+            "Bundle-SymbolicName": "de.undercouch.bson4jackson",
+            "Bundle-Vendor": "Michel Kraemer",
+            '-exportcontents': "de.undercouch.*;version=${version}"
+        )
+    }
+}
+
+tasks.register('doIntegrationTest30', Test) {
+    testClassesDirs = testing.suites.test.sources.output.classesDirs
+    classpath = sourceSets.test.output + sourceSets.main.output + configurations.integrationTest30
+}
+
+tasks.register('doIntegrationTest31', Test) {
+    testClassesDirs = testing.suites.test.sources.output.classesDirs
+    classpath = sourceSets.test.output + sourceSets.main.output + configurations.integrationTest31
+}
+
+tasks.register('doIntegrationTest32', Test) {
+    testClassesDirs = testing.suites.test.sources.output.classesDirs
+    classpath = sourceSets.test.output + sourceSets.main.output + configurations.integrationTest32
+}
+
+tasks.register('integrationTest') {
+    dependsOn([doIntegrationTest30, doIntegrationTest31, doIntegrationTest32])
+}
+
+check.dependsOn integrationTest
+
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+
+            pom {
+               name = 'bson4jackson'
+               packaging = 'jar'
+               description = 'A pluggable BSON generator and parser for Jackson JSON processor.'
+               url = 'https://michelkraemer.com'
+
+               scm {
+                   url = 'scm:git:git://github.com/michel-kraemer/bson4jackson.git'
+                   connection = 'scm:git:git://github.com/michel-kraemer/bson4jackson.git'
+                   developerConnection = 'scm:git:git://github.com/michel-kraemer/bson4jackson.git'
+               }
+
+               licenses {
+                   license {
+                       name = 'The Apache Software License, Version 2.0'
+                       url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                       distribution = 'repo'
+                   }
+               }
+
+               developers {
+                   developer {
+                       id = 'michel-kraemer'
+                       name = 'Michel Kraemer'
+                       email = 'michel@undercouch.de'
+                       url = 'https://michelkraemer.com'
+                   }
+               }
+           }
+        }
+    }
+}
+
+// sign all artifacts
+signing {
+    useGpgCmd()
+    sign publishing.publications.mavenJava
+}
+
+tasks.withType(Sign).configureEach {
+    // only sign release artifacts and not snapshots
+    onlyIf { isReleaseVersion }
+}
+
+nexusPublishing {
+    repositories {
+        sonatype {
+            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
+        }
+    }
+}

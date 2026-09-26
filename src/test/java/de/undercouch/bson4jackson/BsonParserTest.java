@@ -1,0 +1,676 @@
+package de.undercouch.bson4jackson;
+
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
+import de.undercouch.bson4jackson.types.JavaScript;
+import de.undercouch.bson4jackson.types.ObjectId;
+import de.undercouch.bson4jackson.types.Timestamp;
+import org.bson.BSONEncoder;
+import org.bson.BSONObject;
+import org.bson.BasicBSONEncoder;
+import org.bson.BasicBSONObject;
+import org.bson.types.BSONTimestamp;
+import org.bson.types.Binary;
+import org.bson.types.Code;
+import org.bson.types.CodeWScope;
+import org.bson.types.MinKey;
+import org.bson.types.Symbol;
+import org.junit.Test;
+import tools.jackson.core.JsonParser;
+import tools.jackson.core.JsonToken;
+import tools.jackson.core.ObjectReadContext;
+import tools.jackson.core.ObjectWriteContext;
+import tools.jackson.databind.DatabindException;
+import tools.jackson.databind.DeserializationContext;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JacksonModule;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.MappingIterator;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.deser.std.StdDeserializer;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.module.SimpleModule;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+/**
+ * Tests {@link BsonParser}
+ */
+public class BsonParserTest {
+    /**
+     * Simple test class for {@link BsonParserTest#parseRootObjectArray()}
+     */
+    public static class SimpleClass {
+        public String name;
+    }
+
+    /**
+     * Simple test class for {@link BsonParserTest#parseBinaryObject()}
+     */
+    public static class BinaryClass {
+        public byte[] barr;
+    }
+
+    /**
+     * Simple test class for {@link BsonParserTest#parseObjectId()}
+     */
+    public static class ObjectIdClass {
+        public org.bson.types.ObjectId oid;
+    }
+
+    /**
+     * Test class for {@link BsonParserTest#parseWrappedFloat}
+     */
+    public static class OuterClass {
+        @JsonUnwrapped
+        public InnerClass inner = new InnerClass();
+    }
+
+    /**
+     * Test class for {@link BsonParserTest#parseWrappedFloat}
+     */
+    public static class InnerClass {
+        public float floatValue = 40.0f;
+    }
+
+    private <T> T parseBsonObject(BSONObject o, Class<T> cls,
+            JacksonModule... modules) {
+        BSONEncoder enc = new BasicBSONEncoder();
+        byte[] b = enc.encode(o);
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(b);
+        BsonFactory fac = new BsonFactory();
+        ObjectMapper mapper;
+        if (modules != null && modules.length > 0) {
+            var builder = new ObjectMapper(fac).rebuild();
+            for (JacksonModule mod : modules) {
+                builder.addModule(mod);
+            }
+            mapper = builder.build();
+        } else {
+            mapper = new ObjectMapper(fac);
+        }
+        return mapper.readValue(bais, cls);
+    }
+
+    private Map<?, ?> parseBsonObject(BSONObject o) {
+        return parseBsonObject(o, Map.class);
+    }
+
+    /**
+     * Test if primitives can be deserialized
+     */
+    @Test
+    public void parsePrimitives() {
+        BSONObject o = new BasicBSONObject();
+        o.put("Double", 5.0);
+        o.put("Float", 10.0f);
+        o.put("String", "Hello World");
+        o.put("Null", null);
+        o.put("Bool1", true);
+        o.put("Bool2", false);
+        o.put("Int32", 1234);
+        o.put("Int64", 1234L);
+
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(5.0, data.get("Double"));
+        assertEquals(10.0, data.get("Float"));
+        assertEquals("Hello World", data.get("String"));
+        assertNull(data.get("Null"));
+        assertEquals(true, data.get("Bool1"));
+        assertEquals(false, data.get("Bool2"));
+        assertEquals(1234, data.get("Int32"));
+        assertEquals(1234L, data.get("Int64"));
+    }
+
+    /**
+     * Tests reading a very large string. Refers issue #18
+     */
+    @Test
+    public void parseBigString() {
+        BSONObject o = new BasicBSONObject();
+        o.put("String", "abc".repeat(80000));
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(240000, data.get("String").toString().length());
+    }
+
+    /**
+     * Tests reading a very large string using multiple threads. Refers
+     * issue #19. Does not fail reproducibly, but with very high probability.
+     * You may have to run unit tests several times though to really rule out
+     * multi-threading issues.
+     * @throws Exception if something went wrong
+     */
+    @Test
+    public void parseBigStringInThreads() throws Exception {
+        final BSONObject o = new BasicBSONObject();
+        final AtomicInteger fails = new AtomicInteger(0);
+        o.put("String", "abc".repeat(80000));
+
+        ArrayList<Thread> threads = new ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            threads.add(new Thread(() -> {
+                try {
+                    parseBsonObject(o);
+                    Map<?, ?> data = parseBsonObject(o);
+                    assertNotNull(data);
+                } catch (Exception e) {
+                    fail("Threading issue " + fails.incrementAndGet());
+                }
+            }));
+        }
+        for (Thread thread:threads) {
+            thread.start();
+        }
+
+        for (Thread thread:threads) {
+            thread.join();
+        }
+
+        assertEquals(0, fails.get());
+    }
+
+    /**
+     * Test if {@link BigDecimal} objects can be deserialized
+     */
+    @Test
+    public void parseBig() {
+        BSONObject o = new BasicBSONObject();
+        o.put("Double", 5.0);
+        o.put("Int32", 1234);
+        BSONEncoder enc = new BasicBSONEncoder();
+        byte[] b = enc.encode(o);
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(b);
+        ObjectMapper mapper = JsonMapper.builder(new BsonFactory())
+                .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                .enable(DeserializationFeature.USE_BIG_INTEGER_FOR_INTS)
+                .build();
+        Map<?, ?> data = mapper.readValue(bais, Map.class);
+        assertEquals(BigDecimal.class, data.get("Double").getClass());
+        assertEquals(BigInteger.class, data.get("Int32").getClass());
+    }
+
+    /**
+     * Test if a complex BSON object containing various values can be
+     * deserialized
+     */
+    @Test
+    public void parseComplex() {
+        BSONObject o = new BasicBSONObject();
+        o.put("Timestamp", new BSONTimestamp(0xAABB, 0xCCDD));
+        o.put("Symbol", new Symbol("Test"));
+        o.put("ObjectId", new org.bson.types.ObjectId(Integer.MAX_VALUE, 12345));
+        Pattern p = Pattern.compile(".*", Pattern.CASE_INSENSITIVE |
+                Pattern.DOTALL | Pattern.MULTILINE | Pattern.UNICODE_CASE);
+        o.put("Regex", p);
+
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(new Timestamp(0xAABB, 0xCCDD), data.get("Timestamp"));
+        assertEquals(new de.undercouch.bson4jackson.types.Symbol("Test"), data.get("Symbol"));
+        ObjectId oid = (ObjectId)data.get("ObjectId");
+        assertEquals(Integer.MAX_VALUE, oid.getTimestamp());
+        assertEquals(12345, oid.getCounter());
+        Pattern p2 = (Pattern)data.get("Regex");
+        assertEquals(p.flags(), p2.flags());
+        assertEquals(p.pattern(), p2.pattern());
+    }
+
+    /**
+     * Test if undefined values are deserialized correct (i.e. if they
+     * are skipped if the object is deserialized into a {@link Map})
+     */
+    @Test
+    public void parseUndefined() {
+        BSONObject o = new BasicBSONObject();
+        o.put("Undefined", new Object());
+        o.put("Int32", 5);
+        BSONEncoder enc = new BasicBSONEncoder() {
+            @Override
+            protected boolean putSpecial(String name, Object o) {
+                putUndefined(name);
+                return true;
+            }
+        };
+        byte[] b = enc.encode(o);
+        ByteArrayInputStream bais = new ByteArrayInputStream(b);
+        ObjectMapper mapper = new ObjectMapper(new BsonFactory());
+        Map<?, ?> data = mapper.readValue(bais, Map.class);
+        assertEquals(1, data.size());
+        assertEquals(5, data.get("Int32"));
+    }
+
+    /**
+     * Test if embedded objects can be deserialized
+     */
+    @Test
+    public void parseEmbeddedDocument() {
+        BSONObject o1 = new BasicBSONObject();
+        o1.put("Int32", 5);
+        BSONObject o2 = new BasicBSONObject();
+        o2.put("Int64", 10L);
+        o1.put("Obj", o2);
+        o1.put("String", "Hello");
+
+        Map<?, ?> data = parseBsonObject(o1);
+        assertEquals(3, data.size());
+        assertEquals(5, data.get("Int32"));
+        Map<?, ?> data2 = (Map<?, ?>)data.get("Obj");
+        assertEquals(1, data2.size());
+        assertEquals(10L, data2.get("Int64"));
+        assertEquals("Hello", data.get("String"));
+    }
+
+    /**
+     * Test if embedded arrays can be deserialized
+     */
+    @Test
+    public void parseEmbeddedArray() {
+        List<Integer> i = new ArrayList<>();
+        i.add(5);
+        i.add(6);
+        BSONObject o = new BasicBSONObject();
+        o.put("Int32", 5);
+        o.put("Arr", i);
+        o.put("String", "Hello");
+
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(3, data.size());
+        assertEquals(5, data.get("Int32"));
+    }
+
+    /**
+     * Tests reading an embedded document through
+     * {@link BsonParser#readValueAsTree()}. Refers issue #9
+     */
+    @Test
+    public void parseEmbeddedDocumentAsTree() {
+        BSONObject o2 = new BasicBSONObject();
+        o2.put("Int64", 10L);
+
+        BSONObject o3 = new BasicBSONObject();
+        o3.put("Int64", 11L);
+
+        BSONObject o1 = new BasicBSONObject();
+        o1.put("Obj2", o2);
+        o1.put("Obj3", o3);
+
+        BSONEncoder enc = new BasicBSONEncoder();
+        byte[] b = enc.encode(o1);
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(b);
+        BsonFactory fac = new BsonFactory();
+        ObjectMapper mapper = new ObjectMapper(fac);
+
+        BsonParser dec = (BsonParser) mapper.createParser(bais);
+
+        assertEquals(JsonToken.START_OBJECT, dec.nextToken());
+
+        assertEquals(JsonToken.PROPERTY_NAME, dec.nextToken());
+        assertEquals("Obj2", dec.currentName());
+        assertEquals(JsonToken.START_OBJECT, dec.nextToken());
+        JsonNode obj2 = dec.readValueAsTree();
+        assertEquals(1, obj2.size());
+        assertNotNull(obj2.get("Int64"));
+        assertEquals(10L, obj2.get("Int64").longValue());
+
+        assertEquals(JsonToken.PROPERTY_NAME, dec.nextToken());
+        assertEquals("Obj3", dec.currentName());
+        assertEquals(JsonToken.START_OBJECT, dec.nextToken());
+
+        assertEquals(JsonToken.PROPERTY_NAME, dec.nextToken());
+        assertEquals("Int64", dec.currentName());
+        assertEquals(JsonToken.VALUE_NUMBER_INT, dec.nextToken());
+        assertEquals(11L, dec.getLongValue());
+
+        assertEquals(JsonToken.END_OBJECT, dec.nextToken());
+
+        assertEquals(JsonToken.END_OBJECT, dec.nextToken());
+    }
+
+    /**
+     * Test if {@link JavaScript} objects can be deserialized
+     */
+    @Test
+    public void parseCode() {
+        BSONObject scope = new BasicBSONObject();
+        scope.put("Int32", 5);
+
+        BSONObject o = new BasicBSONObject();
+        o.put("Code1", new CodeWScope("alert('test');", scope));
+        o.put("Code2", new Code("alert('Hello');"));
+
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(2, data.size());
+        JavaScript c1 = (JavaScript)data.get("Code1");
+        JavaScript c2 = (JavaScript)data.get("Code2");
+        assertEquals("alert('test');", c1.getCode());
+        assertEquals("alert('Hello');", c2.getCode());
+        Map<String, Object> c1scope = c1.getScope();
+        assertEquals(5, c1scope.get("Int32"));
+    }
+
+    /**
+     * Test if binary objects can be deserialized
+     */
+    @Test
+    public void parseBinary() {
+        byte[] b = new byte[] { 1, 2, 3, 4, 5 };
+        BSONObject o = new BasicBSONObject();
+        o.put("b1", b);
+        o.put("b2", new Binary(BsonConstants.SUBTYPE_BINARY, b));
+        o.put("uuid", new UUID(1L, 2L));
+
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(3, data.size());
+        assertArrayEquals(b, (byte[])data.get("b1"));
+        assertArrayEquals(b, (byte[])data.get("b2"));
+        assertEquals(new UUID(1L, 2L), data.get("uuid"));
+    }
+
+    /**
+     * Test if binary data can be deserialized
+     */
+    @Test
+    public void parseBinaryObject() {
+        byte[] b = new byte[] { 1, 2, 3, 4, 5 };
+        BSONObject o = new BasicBSONObject();
+        o.put("barr", b);
+
+        BinaryClass data = parseBsonObject(o, BinaryClass.class);
+        assertArrayEquals(b, data.barr);
+    }
+
+    /**
+     * Test if {@link BsonParser#nextToken()} returns null if there
+     * is no more input. Refers issue #10.
+     */
+    @Test
+    public void parseBeyondEnd() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BsonFactory bsonFactory = new BsonFactory();
+        BsonGenerator generator = (BsonGenerator) bsonFactory.createGenerator(ObjectWriteContext.empty(), out);
+        generator.writeStartObject();
+        generator.writeStringProperty("myField", "myValue");
+        generator.writeEndObject();
+        generator.close();
+
+        BsonParser parser = (BsonParser) bsonFactory.createParser(ObjectReadContext.empty(), out.toByteArray());
+        // the following loop should throw no exception and end after 4 iterations
+        int i = 0;
+        while (parser.nextToken() != null) {
+            ++i;
+            assertTrue(i <= 4);
+        }
+        assertEquals(4, i);
+    }
+
+    /**
+     * Make sure we honor the length of the document if requested
+     * @throws Exception if something went wrong
+     */
+    @Test
+    public void honorLength() throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BsonFactory bsonFactory = new BsonFactory();
+        bsonFactory.enable(BsonParser.Feature.HONOR_DOCUMENT_LENGTH);
+        BsonGenerator generator = (BsonGenerator) bsonFactory.createGenerator(ObjectWriteContext.empty(), out);
+        generator.writeStartObject();
+        generator.writeStringProperty("myField", "myValue");
+        generator.writeEndObject();
+        generator.close();
+
+        out.write("Hello world!\n".getBytes());
+
+        InputStream is = new ByteArrayInputStream(out.toByteArray());
+        ObjectMapper mapper = new ObjectMapper(bsonFactory);
+        Map<?, ?> result = mapper.readValue(is, Map.class);
+        assertEquals("myValue", result.get("myField"));
+
+        // Now check that we can read the extra string we put at the end
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+        assertEquals("Hello world!", reader.readLine());
+    }
+
+    /**
+     * Checks if the parser returns a textual representation of arbitrary
+     * tokens. See issue #23.
+     */
+    @Test
+    public void parseAsText() {
+        BSONObject o = new BasicBSONObject();
+        o.put("Float", 5.0f);
+        o.put("Int32", 1234);
+        BSONEncoder enc = new BasicBSONEncoder();
+        byte[] b = enc.encode(o);
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(b);
+        BsonFactory fac = new BsonFactory();
+        BsonParser dec = (BsonParser) fac.createParser(ObjectReadContext.empty(), bais);
+
+        assertEquals(JsonToken.START_OBJECT, dec.nextToken());
+
+        assertEquals(JsonToken.PROPERTY_NAME, dec.nextToken());
+        assertEquals("Float", dec.currentName());
+        assertEquals(JsonToken.VALUE_NUMBER_FLOAT, dec.nextToken());
+        assertEquals(5.0f, dec.getFloatValue(), 0.00001);
+        assertEquals("5.0", dec.getString());
+
+        assertEquals(JsonToken.PROPERTY_NAME, dec.nextToken());
+        assertEquals("Int32", dec.currentName());
+        assertEquals(JsonToken.VALUE_NUMBER_INT, dec.nextToken());
+        assertEquals(1234, dec.getIntValue());
+        assertEquals("1234", dec.getString());
+
+        assertEquals(JsonToken.END_OBJECT, dec.nextToken());
+    }
+
+    /**
+     * Tests if a simple BSON file can be read successfully
+     * @throws Exception if something went wrong
+     */
+    @Test
+    public void readBSONFile() throws Exception {
+        try (InputStream is = getClass().getResourceAsStream("test.bson")) {
+            ObjectMapper mapper = new ObjectMapper(new BsonFactory());
+            MappingIterator<BSONObject> iterator =
+                    mapper.readerFor(BasicBSONObject.class).readValues(is);
+
+            BSONObject o = null;
+            while (iterator.hasNext()) {
+                assertNull(o);
+                BSONObject object = iterator.next();
+                assertNotNull(object);
+                o = object;
+            }
+
+            assertEquals("Hello world", o.get("message"));
+            assertEquals(10.0, o.get("size"));
+            assertTrue(o.keySet().contains("_id"));
+            assertEquals(3, o.keySet().size());
+        }
+    }
+
+    /**
+     * Tests if a root-level array can be read correctly. Fixes issue #31
+     */
+    @Test
+    public void parseRootArray() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BsonFactory bsonFactory = new BsonFactory();
+        ObjectMapper mapper = new ObjectMapper(bsonFactory);
+        BsonGenerator generator = (BsonGenerator) mapper.createGenerator(out);
+        generator.writeStartArray();
+        generator.writeString("first");
+        generator.writeString("second");
+        generator.writeString("third");
+        generator.writeEndArray();
+        generator.close();
+
+        InputStream is = new ByteArrayInputStream(out.toByteArray());
+        String[] result = mapper.readValue(is, String[].class);
+        assertEquals("first", result[0]);
+        assertEquals("second", result[1]);
+        assertEquals("third", result[2]);
+    }
+
+    /**
+     * Tests if an empty root array can be parsed correctly
+     */
+    @Test
+    public void parseEmptyRootArray() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BsonFactory bsonFactory = new BsonFactory();
+        ObjectMapper mapper = new ObjectMapper(bsonFactory);
+        BsonGenerator generator = (BsonGenerator) mapper.createGenerator(out);
+        generator.writeStartArray();
+        generator.writeEndArray();
+        generator.close();
+
+        InputStream is = new ByteArrayInputStream(out.toByteArray());
+        String[] result = mapper.readValue(is, String[].class);
+        assertEquals(0, result.length);
+    }
+
+    /**
+     * Tests if a root object is not accidentally parsed as an array
+     */
+    @Test(expected = DatabindException.class)
+    public void parseRootObjectAsArray() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BsonFactory bsonFactory = new BsonFactory();
+        ObjectMapper mapper = new ObjectMapper(bsonFactory);
+        BsonGenerator generator = (BsonGenerator) mapper.createGenerator(out);
+        generator.writeStartObject();
+        generator.writeStringProperty("myField", "myValue");
+        generator.writeEndObject();
+        generator.close();
+
+        InputStream is = new ByteArrayInputStream(out.toByteArray());
+        mapper.readValue(is, String[].class);
+    }
+
+    /**
+     * Creates a root array consisting of two simple objects and tries to
+     * deserialize them
+     */
+    @Test
+    public void parseRootObjectArray() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        BsonFactory bsonFactory = new BsonFactory();
+        ObjectMapper mapper = new ObjectMapper(bsonFactory);
+        BsonGenerator generator = (BsonGenerator) mapper.createGenerator(out);
+        generator.writeStartArray();
+        generator.writeStartObject();
+        generator.writeStringProperty("name", "test");
+        generator.writeEndObject();
+        generator.writeStartObject();
+        generator.writeStringProperty("name", "test2");
+        generator.writeEndObject();
+        generator.writeEndArray();
+        generator.close();
+
+        InputStream is = new ByteArrayInputStream(out.toByteArray());
+        SimpleClass[] result = mapper.readValue(is, SimpleClass[].class);
+        assertEquals("test", result[0].name);
+        assertEquals("test2", result[1].name);
+    }
+
+    /**
+     * Check if org.bson.types.ObjectId can be serialized and deserialized as
+     * a byte array. See issue #38
+     */
+    @Test
+    public void parseObjectId() {
+        class ObjectIdDeserializer extends StdDeserializer<org.bson.types.ObjectId> {
+            protected ObjectIdDeserializer() {
+                super(org.bson.types.ObjectId.class);
+            }
+
+            @Override
+            public org.bson.types.ObjectId deserialize(JsonParser jp,
+                    DeserializationContext ctxt) {
+                return new org.bson.types.ObjectId(jp.getBinaryValue());
+            }
+        }
+
+        org.bson.types.ObjectId oid = new org.bson.types.ObjectId();
+        BSONObject o = new BasicBSONObject();
+        o.put("oid", oid.toByteArray());
+
+        SimpleModule mod = new SimpleModule();
+        mod.addDeserializer(org.bson.types.ObjectId.class, new ObjectIdDeserializer());
+
+        ObjectIdClass res = parseBsonObject(o, ObjectIdClass.class, mod);
+        assertEquals(oid, res.oid);
+    }
+
+    /**
+     * Check if a MinKey can be parsed. Refers issue #51
+     */
+    @Test
+    public void parseMinKey() {
+        BSONObject o = new BasicBSONObject();
+        o.put("A", new MinKey());
+        Map<?, ?> data = parseBsonObject(o);
+        assertEquals(1, data.size());
+        assertEquals("MinKey", data.get("A"));
+    }
+
+    /**
+     * Test if wrapped floats can be deserialized. Refers issue #121.
+     */
+    @Test
+    public void parseWrappedFloat() {
+        OuterClass outer = new OuterClass();
+        outer.inner.floatValue = 50.0f;
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+        ObjectMapper mapper = new ObjectMapper(new BsonFactory());
+
+        mapper.writeValue(baos, outer);
+
+        ByteArrayInputStream bais = new ByteArrayInputStream(baos.toByteArray());
+        OuterClass clone = mapper.readValue(bais, OuterClass.class);
+
+        assertEquals(clone.inner.floatValue, outer.inner.floatValue, 0);
+    }
+
+    /**
+     * Parse empty object, specifically checking currentToken() along the
+     * way. See issue #128
+     */
+    @Test
+    public void parseEmptyObject() {
+        byte[] emptyBsonBytes = new BasicBSONEncoder().encode(new BasicBSONObject());
+        ObjectMapper mapper = new ObjectMapper(new BsonFactory());
+        try (BsonParser dec = (BsonParser) mapper.createParser(emptyBsonBytes)) {
+            assertNull(dec.currentToken());
+            assertEquals(JsonToken.START_OBJECT, dec.nextToken());
+            assertEquals(JsonToken.START_OBJECT, dec.currentToken());
+            assertEquals(JsonToken.END_OBJECT, dec.nextToken());
+            assertEquals(JsonToken.END_OBJECT, dec.currentToken());
+            assertNull(dec.nextToken());
+            assertNull(dec.currentToken());
+        }
+    }
+}

@@ -1,0 +1,102 @@
+package de.undercouch.bson4jackson.io;
+
+import org.junit.Before;
+import org.junit.Test;
+
+import java.util.Arrays;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+
+/**
+ * Tests {@link UnsafeByteArrayInputStream}
+ */
+public class UnsafeByteArrayInputStreamTest {
+    private static final byte[] BUF = "aXcdefghijklmnopqrstuvwxyz\0\0".getBytes();
+    static {
+        BUF[1] = (byte)0xff;
+        BUF[BUF.length - 1] = (byte)0xff;
+    }
+    private UnsafeByteArrayInputStream _in;
+
+    @Before
+    public void setUp() {
+        _in = new UnsafeByteArrayInputStream(BUF);
+    }
+
+    @Test
+    public void available() {
+        assertEquals(BUF.length, _in.available());
+        assertEquals(BUF[0], _in.read());
+        assertEquals(BUF.length - 1, _in.available());
+        assertEquals(5, _in.read(new byte[5], 0, 5));
+        assertEquals(BUF.length - 6, _in.available());
+    }
+
+    @Test
+    public void read() {
+        assertEquals('a', _in.read());
+        assertEquals(0xFF, _in.read());
+        assertEquals('c', _in.read());
+
+        byte[] b = new byte[10];
+        assertEquals(5, _in.read(b, 0, 5));
+        assertArrayEquals(Arrays.copyOf("defgh".getBytes(), 10), b);
+        assertEquals(5, _in.read(b, 5, 5));
+        assertArrayEquals("defghijklm".getBytes(), b);
+
+        assertEquals(10, _in.read(b, 0, 10));
+        assertArrayEquals("nopqrstuvw".getBytes(), b);
+
+        byte[] b2 = new byte[10];
+        assertEquals(5, _in.read(b2, 0, 10));
+        byte[] expected = Arrays.copyOf("xyz\0".getBytes(), 10);
+        expected[4] = (byte)0xff;
+        assertArrayEquals(expected, b2);
+
+        assertEquals(-1, _in.read());
+        assertEquals(-1, _in.read(b2, 0, 10));
+    }
+
+    @Test
+    public void readFF() {
+        assertEquals(26, _in.skip(26));
+        assertEquals(0, _in.read());
+        assertEquals((byte)0xff, (byte)_in.read());
+    }
+
+    @Test
+    public void skip() {
+        assertEquals('a', _in.read());
+        assertEquals(1, _in.skip(1));
+        assertEquals('c', _in.read());
+        assertEquals(20, _in.skip(20));
+        assertEquals('x', _in.read());
+        assertEquals(4, _in.skip(20));
+        assertEquals(-1, _in.read());
+    }
+
+    @Test
+    public void offset() {
+        _in = new UnsafeByteArrayInputStream(BUF, 3, 3);
+        assertEquals('d', _in.read());
+        assertEquals('e', _in.read());
+        assertEquals('f', _in.read());
+        assertEquals(-1, _in.read());
+    }
+
+    @Test
+    public void mark() {
+        assertEquals('a', _in.read());
+        assertEquals(0xFF, _in.read());
+        assertEquals('c', _in.read());
+        _in.mark(3);
+        assertEquals('d', _in.read());
+        assertEquals('e', _in.read());
+        assertEquals('f', _in.read());
+        _in.reset();
+        assertEquals('d', _in.read());
+        assertEquals('e', _in.read());
+        assertEquals('f', _in.read());
+    }
+}
